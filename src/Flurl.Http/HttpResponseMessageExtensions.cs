@@ -10,7 +10,8 @@ using Flurl.Util;
 namespace Flurl.Http
 {
 	/// <summary>
-	/// Async extension methods that can be chained off Task&lt;HttpResponseMessage&gt;, avoiding nested awaits.
+	/// Extension methods off HttpResponseMessage, and async extension methods off Task&lt;HttpResponseMessage&gt;
+	/// that allow chaining off methods like SendAsync without the need for nested awaits.
 	/// </summary>
 	public static class HttpResponseMessageExtensions
 	{
@@ -22,18 +23,19 @@ namespace Flurl.Http
 		/// <example>x = await url.PostAsync(data).ReceiveJson&lt;T&gt;()</example>
 		/// <exception cref="FlurlHttpException">Condition.</exception>
 		public static async Task<T> ReceiveJson<T>(this Task<HttpResponseMessage> response) {
-			var resp = await response.ConfigureAwait(false);
-			if (resp == null) return default(T);
-
-			var call = resp.RequestMessage.GetHttpCall();
-			using (var stream = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false)) {
-				try {
-					return call.FlurlRequest.Settings.JsonSerializer.Deserialize<T>(stream);
-				}
-				catch (Exception ex) {
-					call.Exception = new FlurlParsingException(call, "JSON", ex);
-					await FlurlRequest.HandleExceptionAsync(call, call.Exception, CancellationToken.None).ConfigureAwait(false);
-					return default(T);
+			using (var resp = await response.ConfigureAwait(false)) {
+				if (resp == null) return default(T);
+				var call = resp.RequestMessage.GetHttpCall();
+				using (var stream = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false)) {
+					try {
+						return call.FlurlRequest.Settings.JsonSerializer.Deserialize<T>(stream);
+					}
+					catch (Exception ex) {
+						var body = await resp.Content.ReadAsStringAsync();
+						call.Exception = new FlurlParsingException(call, "JSON", body, ex);
+						await FlurlRequest.HandleExceptionAsync(call, call.Exception, CancellationToken.None).ConfigureAwait(false);
+						return default(T);
+					}
 				}
 			}
 		}
@@ -69,10 +71,10 @@ namespace Flurl.Http
 			// https://stackoverflow.com/questions/46119872/encoding-issues-with-net-core-2 (#86)
 			System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
 #endif
-			var resp = await response.ConfigureAwait(false);
-			if (resp == null) return null;
-
-			return await resp.Content.StripCharsetQuotes().ReadAsStringAsync().ConfigureAwait(false);
+			using (var resp = await response.ConfigureAwait(false)) {
+				if (resp == null) return null;
+				return await resp.Content.StripCharsetQuotes().ReadAsStringAsync().ConfigureAwait(false);
+			}
 		}
 
 		/// <summary>
@@ -81,10 +83,17 @@ namespace Flurl.Http
 		/// <returns>A Task whose result is the response body as a stream.</returns>
 		/// <example>stream = await url.PostAsync(data).ReceiveStream()</example>
 		public static async Task<Stream> ReceiveStream(this Task<HttpResponseMessage> response) {
+			// do not wrap resp in a using statement or we'll dispose the stream. caller is responsible for this.
 			var resp = await response.ConfigureAwait(false);
 			if (resp == null) return null;
 
-			return await resp.Content.ReadAsStreamAsync().ConfigureAwait(false);
+			try {
+				return await resp.Content.ReadAsStreamAsync().ConfigureAwait(false);
+			}
+			catch {
+				resp.Dispose();
+				throw;
+			}
 		}
 
 		/// <summary>
@@ -93,10 +102,33 @@ namespace Flurl.Http
 		/// <returns>A Task whose result is the response body as a byte array.</returns>
 		/// <example>bytes = await url.PostAsync(data).ReceiveBytes()</example>
 		public static async Task<byte[]> ReceiveBytes(this Task<HttpResponseMessage> response) {
-			var resp = await response.ConfigureAwait(false);
-			if (resp == null) return null;
+			using (var resp = await response.ConfigureAwait(false)) {
+				if (resp == null) return null;
+				return await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+			}
+		}
 
-			return await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+		/// <summary>
+		/// Set a header on this HttpResponseMessage (default), or its Content property if it's a known content-level header.
+		/// No validation. Overwrites any existing value(s) for the header. 
+		/// </summary>
+		/// <param name="response">The HttpResponseMessage.</param>
+		/// <param name="name">The header name.</param>
+		/// <param name="value">The header value.</param>
+		/// <param name="createContentIfNecessary">If it's a content-level header and there is no content, this determines whether to create an empty HttpContent or just ignore the header.</param>
+		public static void SetHeader(this HttpResponseMessage response, string name, object value, bool createContentIfNecessary = true) {
+			new HttpMessage(response).SetHeader(name, value, createContentIfNecessary);
+		}
+
+		/// <summary>
+		/// Gets the value of a header on this HttpResponseMessage (default), or its Content property.
+		/// Returns null if the header doesn't exist.
+		/// </summary>
+		/// <param name="response">The HttpResponseMessage.</param>
+		/// <param name="name">The header name.</param>
+		/// <returns>The header value.</returns>
+		public static string GetHeaderValue(this HttpResponseMessage response, string name) {
+			return new HttpMessage(response).GetHeaderValue(name);
 		}
 
 		// https://github.com/tmenier/Flurl/pull/76, https://github.com/dotnet/corefx/issues/5014

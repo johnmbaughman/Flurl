@@ -22,7 +22,7 @@ public void Can_Create_Person() {
         httpTest.RespondWith(200, "OK");
 
         // act
-        await sut.CreatePersonAsync("Frank", "Underwood");
+        await sut.CreatePersonAsync("Claire", "Underwood");
         
         // assert
         httpTest.ShouldHaveCalled("http://api.mysite.com/*")
@@ -42,4 +42,4 @@ Or get just the stand-alone URL builder without the HTTP features:
 
 For updates and announcements, [follow @FlurlHttp on Twitter](https://twitter.com/intent/user?screen_name=FlurlHttp).
 
-For detailed documentation, please visit the [main site](http://tmenier.github.io/Flurl/). 
+For detailed documentation, please visit the [main site](https://flurl.dev). 

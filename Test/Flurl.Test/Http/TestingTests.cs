@@ -69,6 +69,22 @@ namespace Flurl.Test.Http
 		}
 
 		[Test]
+		public async Task can_assert_json_request() {
+			var body = new { a = 1, b = 2 };
+			await "http://some-api.com".PostJsonAsync(body);
+
+			HttpTest.ShouldHaveMadeACall().WithRequestJson(body);
+		}
+
+		[Test]
+		public async Task can_assert_url_encoded_request() {
+			var body = new { a = 1, b = 2, c = "hi there", d = new[] { 1, 2, 3 } };
+			await "http://some-api.com".PostUrlEncodedAsync(body);
+
+			HttpTest.ShouldHaveMadeACall().WithRequestUrlEncoded(body);
+		}
+
+		[Test]
 		public async Task can_assert_query_params() {
 			await "http://www.api.com?x=111&y=222&z=333#abcd".GetAsync();
 
@@ -221,6 +237,17 @@ namespace Flurl.Test.Http
 
 		[Test]
 		public async Task can_test_in_parallel() {
+			async Task CallAndAssertCountAsync(int calls) {
+				using (var test = new HttpTest()) {
+					for (int i = 0; i < calls; i++) {
+						await "http://www.api.com".GetAsync();
+						await Task.Delay(100);
+					}
+					test.ShouldHaveCalled("http://www.api.com").Times(calls);
+					//Console.WriteLine($"{calls} calls expected, {test.CallLog.Count} calls made");
+				}
+			}
+
 			await Task.WhenAll(
 				CallAndAssertCountAsync(7),
 				CallAndAssertCountAsync(5),
@@ -239,14 +266,58 @@ namespace Flurl.Test.Http
 				.WithContentType("application/json");
 		}
 
-		private async Task CallAndAssertCountAsync(int calls) {
-			using (var test = new HttpTest()) {
-				for (int i = 0; i < calls; i++) {
-					await "http://www.api.com".GetAsync();
-					await Task.Delay(100);
+		[Test] // #331
+		public async Task can_fake_content_headers() {
+			HttpTest.RespondWith("<xml></xml>", 200, new { Content_Type = "text/xml" });
+			await "http://api.com".GetAsync();
+			HttpTest.ShouldHaveMadeACall().With(call => call.Response.Content.Headers.ContentType.MediaType == "text/xml");
+		}
+
+		[Test] // #335
+		public async Task doesnt_record_calls_made_with_HttpClient() {
+			using (var httpTest = new HttpTest()) {
+				httpTest.RespondWith("Hello");
+				var flurClient = new FlurlClient();
+				// use the underlying HttpClient directly
+				await flurClient.HttpClient.GetStringAsync("http://google.com/");
+				CollectionAssert.IsEmpty(httpTest.CallLog);
+			}
+		}
+
+		[Test, Ignore("bug repro, not yet fixed")] // #366 & #398
+		public async Task can_use_response_queue_in_parallel() {
+			var cli = new FlurlClient("http://api.com");
+			cli.Settings.BeforeCallAsync = call => Task.Delay(500);
+
+			for (var i = 0; i < 100; i++) {
+				using (var test = new HttpTest()) {
+					test
+						.RespondWith("0")
+						.RespondWith("1")
+						.RespondWith("2")
+						.RespondWith("3")
+						.RespondWith("4")
+						.RespondWith("5")
+						.RespondWith("6")
+						.RespondWith("7")
+						.RespondWith("8")
+						.RespondWith("9");
+
+					var results = await Task.WhenAll(
+						cli.Request().GetStringAsync(),
+						cli.Request().GetStringAsync(),
+						cli.Request().GetStringAsync(),
+						cli.Request().GetStringAsync(),
+						cli.Request().GetStringAsync(),
+						cli.Request().GetStringAsync(),
+						cli.Request().GetStringAsync(),
+						cli.Request().GetStringAsync(),
+						cli.Request().GetStringAsync(),
+						cli.Request().GetStringAsync());
+
+					CollectionAssert.AllItemsAreUnique(results);
+					CollectionAssert.IsEmpty(test.ResponseQueue);
 				}
-				test.ShouldHaveCalled("http://www.api.com").Times(calls);
-				//Console.WriteLine($"{calls} calls expected, {test.CallLog.Count} calls made");
 			}
 		}
 	}

@@ -31,10 +31,10 @@ namespace Flurl.Http
 		/// </summary>
 		/// <param name="verb">The HTTP method used to make the request.</param>
 		/// <param name="content">Contents of the request body.</param>
-		/// <param name="cancellationToken">A cancellation token that can be used by other objects or threads to receive notice of cancellation. Optional.</param>
+		/// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
 		/// <param name="completionOption">The HttpCompletionOption used in the request. Optional.</param>
 		/// <returns>A Task whose result is the received HttpResponseMessage.</returns>
-		Task<HttpResponseMessage> SendAsync(HttpMethod verb, HttpContent content = null, CancellationToken? cancellationToken = null, HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead);
+		Task<HttpResponseMessage> SendAsync(HttpMethod verb, HttpContent content = null, CancellationToken cancellationToken = default(CancellationToken), HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead);
 	}
 
 	/// <summary>
@@ -108,33 +108,35 @@ namespace Flurl.Http
 		public IDictionary<string, Cookie> Cookies => Client.Cookies;
 
 		/// <inheritdoc />
-		public async Task<HttpResponseMessage> SendAsync(HttpMethod verb, HttpContent content = null, CancellationToken? cancellationToken = null, HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead) {
+		public async Task<HttpResponseMessage> SendAsync(HttpMethod verb, HttpContent content = null, CancellationToken cancellationToken = default(CancellationToken), HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead) {
+			_client = Client; // "freeze" the client at this point to avoid excessive calls to FlurlClientFactory.Get (#374)
+
 			var request = new HttpRequestMessage(verb, Url) { Content = content };
 			var call = new HttpCall { FlurlRequest = this, Request = request };
 			request.SetHttpCall(call);
 
 			await HandleEventAsync(Settings.BeforeCall, Settings.BeforeCallAsync, call).ConfigureAwait(false);
-			request.RequestUri = new Uri(Url); // in case it was modifed in the handler above
+			request.RequestUri = Url.ToUri(); // in case it was modified in the handler above
 
-			var userToken = cancellationToken ?? CancellationToken.None;
-			var token = userToken;
+			var cancellationTokenWithTimeout = cancellationToken;
+			CancellationTokenSource timeoutTokenSource = null;
 
 			if (Settings.Timeout.HasValue) {
-				var cts = CancellationTokenSource.CreateLinkedTokenSource(userToken);
-				cts.CancelAfter(Settings.Timeout.Value);
-				token = cts.Token;
+				timeoutTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+				timeoutTokenSource.CancelAfter(Settings.Timeout.Value);
+				cancellationTokenWithTimeout = timeoutTokenSource.Token;
 			}
 
 			call.StartedUtc = DateTime.UtcNow;
 			try {
-				WriteHeaders(request);
+				Headers.Merge(Client.Headers);
+				foreach (var header in Headers)
+					request.SetHeader(header.Key, header.Value);
+
 				if (Settings.CookiesEnabled)
 					WriteRequestCookies(request);
 
-				if (Client.CheckAndRenewConnectionLease())
-					request.Headers.ConnectionClose = true;
-
-				call.Response = await Client.HttpClient.SendAsync(request, completionOption, token).ConfigureAwait(false);
+				call.Response = await Client.HttpClient.SendAsync(request, completionOption, cancellationTokenWithTimeout).ConfigureAwait(false);
 				call.Response.RequestMessage = request;
 
 				if (call.Succeeded)
@@ -143,47 +145,17 @@ namespace Flurl.Http
 				throw new FlurlHttpException(call, null);
 			}
 			catch (Exception ex) {
-				return await HandleExceptionAsync(call, ex, userToken);
+				return await HandleExceptionAsync(call, ex, cancellationToken);
 			}
 			finally {
 				request.Dispose();
+				timeoutTokenSource?.Dispose();
+
 				if (Settings.CookiesEnabled)
 					ReadResponseCookies(call.Response);
 
 				call.EndedUtc = DateTime.UtcNow;
 				await HandleEventAsync(Settings.AfterCall, Settings.AfterCallAsync, call).ConfigureAwait(false);
-			}
-		}
-
-		private void WriteHeaders(HttpRequestMessage request) {
-			Headers.Merge(Client.Headers);
-			foreach (var header in Headers) {
-				// Flurl favors being a lot less fancy with headers than HttpClient. No validation,
-				// no request-level vs. content-level, no collections of values. Just overwriteable
-				// name/value pairs. But we're using HttpClient to send the request, so we need
-				// to translate to the fancy way just before sending.
-				switch (header.Key.ToLower()) {
-					// https://msdn.microsoft.com/en-us/library/system.net.http.headers.httpcontentheaders.aspx
-					case "content-disposition":
-					case "content-length":
-					case "content-location":
-					case "content-md5":
-					case "content-range":
-					case "content-type":
-					case "expires":
-					case "last-modified":
-						// it's a content-level header
-						request.Content.Headers.Remove(header.Key);
-						if (header.Value != null)
-							request.Content.Headers.TryAddWithoutValidation(header.Key, header.Value.ToInvariantString());
-						break;
-					default:
-						// it's a request-level header
-						request.Headers.Remove(header.Key);
-						if (header.Value != null)
-							request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToInvariantString());
-						break;
-				}
 			}
 		}
 

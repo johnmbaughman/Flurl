@@ -168,11 +168,20 @@ namespace Flurl.Http.Testing
 		}
 
 		/// <summary>
-		/// Asserts whether calls were made containing given request body.
+		/// Asserts whether calls were made containing given JSON-encoded request body.
 		/// </summary>
 		/// <param name="body"></param>
 		public HttpCallAssertion WithRequestJson(object body) {
 			var serializedBody = FlurlHttp.GlobalSettings.JsonSerializer.Serialize(body);
+			return WithRequestBody(serializedBody);
+		}
+
+		/// <summary>
+		/// Asserts whether calls were made containing given URL-encoded request body.
+		/// </summary>
+		/// <param name="body"></param>
+		public HttpCallAssertion WithRequestUrlEncoded(object body) {
+			var serializedBody = FlurlHttp.GlobalSettings.UrlEncodedSerializer.Serialize(body);
 			return WithRequestBody(serializedBody);
 		}
 
@@ -211,9 +220,10 @@ namespace Flurl.Http.Testing
 		/// <returns></returns>
 		public HttpCallAssertion WithHeader(string name, string valuePattern = "*") {
 			_expectedConditions.Add($"header {name}: {valuePattern}");
-			return With(c =>
-				c.Request.Headers.TryGetValues(name, out var vals) &&
-				MatchesPattern(string.Join(" ", vals), valuePattern));
+			return With(c => {
+				var val = c.Request.GetHeaderValue(name);
+				return val != null && MatchesPattern(val, valuePattern);
+			});
 		}
 
 		/// <summary>
@@ -224,9 +234,10 @@ namespace Flurl.Http.Testing
 		/// <returns></returns>
 		public HttpCallAssertion WithoutHeader(string name, string valuePattern = "*") {
 			_expectedConditions.Add($"no header {name}: {valuePattern}");
-			return Without(c =>
-				c.Request.Headers.TryGetValues(name, out var vals) &&
-				vals.Any(v => MatchesPattern(v, valuePattern)));
+			return Without(c => {
+				var val = c.Request.GetHeaderValue(name);
+				return val != null && MatchesPattern(val, valuePattern);
+			});
 		}
 
 		/// <summary>
